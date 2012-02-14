@@ -85,9 +85,8 @@
         var layer = new OpenLayers.Layer.WMS(
             "Name",
             "http://labs.metacarta.com/TESTURL?",
-            {layers: 'basic'}, {async: true, getURLasync: function(bounds, scope, url, callback) {
-                scope.url = this.getURL(bounds);
-                callback.call(scope);
+            {layers: 'basic'}, {async: true, getURLasync: function(bounds, callback, scope) {
+                callback.call(scope, this.getURL(bounds));
             }}
         ); 
         map.addLayer(layer);
@@ -110,7 +109,7 @@
     }
 
     function test_Tile_Image_draw (t) {
-        t.plan( 7 );
+        t.plan(8);
 
         var map = new OpenLayers.Map('map');
         
@@ -157,8 +156,9 @@
                  "http://labs.metacarta.com/TESTURL?" + OpenLayers.Util.getParameterString(tParams),
                  "tile.draw creates an image");
         });
-        t.eq( tile.imgDiv.style.width, "100%", "Image width is correct" );
-        t.eq( tile.imgDiv.style.height, "100%", "Image height is correct" );
+        t.eq( tile.imgDiv.style.width, "5%", "Image width is correct" );
+        t.eq( tile.imgDiv.style.height, "6%", "Image height is correct" );
+        t.ok( tile.imgDiv.parentNode === layer.div, "Image is directly appended to the layer div" ); 
 
         // this should trigger a "reload" event (since the image never actually
         // loads in tests)
@@ -255,20 +255,20 @@
         var size = new OpenLayers.Size(5,6);
         var map = new OpenLayers.Map('map');
         var layer = new OpenLayers.Layer.WMS( "OpenLayers WMS", 
-            "http://labs.metacarta.com/wms/vmap0?", {layers: 'basic'}, {'reproject': true}); 
+            "http://labs.metacarta.com/wms/vmap0?", {layers: 'basic'}); 
         map.addLayer(layer);
         map.zoomToMaxExtent();
         tile = new OpenLayers.Tile.Image(layer, position, new OpenLayers.Bounds(-90,-85,-90,85), url, size);
         tile.draw();
         tile.moveTo(new OpenLayers.Bounds(-185,-90,-180,-80), new OpenLayers.Pixel(-180,-85), true);
-        t.delay_call( 1, function() { t.eq(tile.imgDiv.style.display, "none", "Tile image is invisible.") } );
+        t.delay_call( 1, function() { t.eq(tile.imgDiv.style.visibility, "hidden", "Tile image is invisible.") } );
         var layer = new OpenLayers.Layer.WMS( "OpenLayers WMS", 
-            "http://labs.metacarta.com/wms/vmap0?", {layers: 'basic'}, {'reproject': true, 'alpha':true});
+            "http://labs.metacarta.com/wms/vmap0?", {layers: 'basic'}, {'alpha':true});
         map.addLayer(layer);
         tile = new OpenLayers.Tile.Image(layer, position, new OpenLayers.Bounds(-90,-85,-90,85), url, size);
         tile.draw();
         tile.moveTo(new OpenLayers.Bounds(-185,-90,-180,-80), new OpenLayers.Pixel(-180,-85), true)
-        t.delay_call( 1, function() { t.eq(tile.imgDiv.style.display, "none", "Alpha tile image is invisible.") } );
+        t.delay_call( 1, function() { t.eq(tile.imgDiv.style.visibility, "hidden", "Alpha tile image is invisible.") } );
         
     }
 
@@ -317,8 +317,8 @@
         map.destroy();
     }
     
-    function test_insertBackBuffer(t) {
-        t.plan(4);
+    function test_createBackBuffer(t) {
+        t.plan(3);
 
         var map = new OpenLayers.Map('map');
         var layer = new OpenLayers.Layer.WMS( "OpenLayers WMS", 
@@ -326,13 +326,103 @@
         map.addLayer(layer);
         map.setCenter(new OpenLayers.LonLat(0,0), 5);
         var tile = layer.grid[0][0];
+
+        // we're going to create a back buffer while the image
+        // is actually loading, so we call stopObservingElement
+        // to avoid any unexpected behavior
+        tile.isLoading = false;
+        OpenLayers.Event.stopObservingElement(tile.imgDiv);
+
         var img = tile.imgDiv;
-        var backBuffer = tile.insertBackBuffer();
-        t.eq(backBuffer.style.left, tile.frame.style.left, "backBuffer tile has same left style as frame");
-        t.ok(backBuffer.parentNode === layer.div, "backBuffer inserted into layer div");
-        t.ok(backBuffer.firstChild === img, "image appended to backBuffer");
+        var left = img.style.left;
+        var bb = tile.createBackBuffer();
+        t.eq(bb.style.left, left, "backbuffer has same left style as frame");
+        t.ok(bb === img, "image appended to bb");
         t.ok(tile.imgDiv == null, "image reference removed from tile");
         map.destroy();
+    }
+
+    function test_onImageLoad(t) {
+        t.plan(3);
+
+        var map = new OpenLayers.Map('map');
+        var layer = new OpenLayers.Layer.WMS( "OpenLayers WMS",
+            "http://labs.metacarta.com/wms/vmap0?", {layers: 'basic'}, {opacity: 0.5});
+        map.addLayer(layer);
+        map.setCenter(new OpenLayers.LonLat(0,0), 5);
+
+        var tile = layer.grid[0][0];
+
+        var log;
+        tile.events.on({loadend: function() { log++; }});
+
+        log = 0;
+        tile.onImageLoad();
+        t.eq(tile.imgDiv.style.visibility, 'inherit',
+             'onImageLoad makes the image visible');
+        t.eq(parseFloat(tile.imgDiv.style.opacity), 0.5,
+             'onImageLoad sets the expected opacity for the image');
+        t.eq(log, 1,
+             'onImageLoad does trigger loadend');
+
+        map.destroy();
+    }
+
+    // test for https://github.com/openlayers/openlayers/pull/36
+    // (more an integration test than a unit test)
+    function test_olImageLoadError(t) {
+        t.plan(2);
+
+        var map = new OpenLayers.Map('map');
+        var layer = new OpenLayers.Layer.WMS("invalid",  "", {layers: 'basic'});
+        map.addLayer(layer);
+
+        var size = new OpenLayers.Size(5, 6);
+        var position = new OpenLayers.Pixel(20, 30);
+        var bounds = new OpenLayers.Bounds(1, 2, 3, 4);
+
+        var tile = new OpenLayers.Tile.Image(layer, position, bounds, null, size);
+        tile.draw();
+
+        t.delay_call(0.1, function() {
+
+            // check initial state
+            t.ok(OpenLayers.Element.hasClass(tile.imgDiv, 'olImageLoadError'),
+                 'tile image has the olImageLoadError class (init state)');
+
+            layer.setVisibility(false);
+            layer.setVisibility(true);
+
+            t.ok(OpenLayers.Element.hasClass(tile.imgDiv, 'olImageLoadError'),
+                 'tile image still has the olImageLoadError class');
+
+            map.destroy();
+        });
+    }
+
+    function test_getCanvasContext(t) {
+        if (!OpenLayers.CANVAS_SUPPORTED) {
+            t.plan(0);
+        } else {
+            t.plan(1);
+
+            var map = new OpenLayers.Map('map');
+            var layer = new OpenLayers.Layer.WMS("OpenLayers WMS",
+                "http://labs.metacarta.com/wms/vmap0?", {layers: 'basic'});
+            map.addLayer(layer);
+            map.setCenter(new OpenLayers.LonLat(0, 0), 5);
+
+            t.delay_call(5, function() {
+                var tile = layer.grid[0][0];
+                if (tile.isLoading) {
+                    t.ok(false, "test_getCanvasContext timeout");
+                } else {
+                    t.ok(tile.getCanvasContext() instanceof CanvasRenderingContext2D,
+                         "getCanvasContext() returns CanvasRenderingContext2D instance");
+                }
+                map.destroy();
+            });
+        }
     }
     
   </script>
